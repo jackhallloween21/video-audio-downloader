@@ -2,7 +2,7 @@
 
 A modern desktop video & audio downloader powered by **yt-dlp** and **ffmpeg**.
 Both tools are **downloaded automatically on first run** — nothing to install by hand.
-
+<p align="center"><img src="assets/icon.png" width="96" alt="icon"></p>
 ## Download for Windows
 
 **[⬇ Download YT-Downloader.exe](https://github.com/jackhallloween21/video-audio-downloader/releases/latest/download/YT-Downloader.exe)** (~20 MB)
@@ -20,7 +20,7 @@ No installer, no terminal window — just run it. Every published build is attac
 
 ![Light mode](docs/screenshot-light.png)
 
-<p align="center"><img src="assets/icon.png" width="96" alt="icon"></p>
+
 
 ## Features
 
