@@ -10,6 +10,7 @@ Build an .exe:     see README.md / .github/workflows/build.yml
 """
 
 import colorsys
+import ctypes
 import io
 import json
 import math
@@ -56,10 +57,33 @@ if not FROZEN:
     _ensure("pillow", "PIL")
 
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageOps
+
+
+def _suppress_ctk_pumps():
+    # CTkOptionMenu._draw and CTkScrollbar._draw end with
+    # canvas.update_idletasks(), which pumps WM_PAINT in the middle of a
+    # recolor (staged/partial repaint flicker) and stutters on every scroll
+    # tick. Let those draws happen on the normal idle cycle instead.
+    for _cls in (ctk.CTkOptionMenu, ctk.CTkScrollbar):
+        _orig = _cls._draw
+
+        def _draw(self, *_a, _orig=_orig, **_k):
+            cv = self._canvas
+            saved = cv.update_idletasks
+            cv.update_idletasks = lambda: None
+            try:
+                return _orig(self, *_a, **_k)
+            finally:
+                cv.update_idletasks = saved
+
+        _cls._draw = _draw
+
+
+_suppress_ctk_pumps()
 
 # --------------------------------------------------------------------------- #
 # Constants / paths
@@ -77,6 +101,7 @@ BIN_DIR = APP_DIR / "bin"
 THUMB_DIR = APP_DIR / "thumbs"
 SETTINGS_FILE = APP_DIR / "settings.json"
 HISTORY_FILE = APP_DIR / "history.json"
+ACTIVE_FILE = APP_DIR / "active.json"
 for _d in (BIN_DIR, THUMB_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -264,6 +289,84 @@ def set_theme(name):
     GREEN, RED, SEG_ON, SEG_ON_H = p["green"], p["red"], p["seg_on"], p["seg_on_h"]
     ON_ACCENT = p["on_accent"]
     _derive_accent()
+
+
+PAL_NAMES = ("bg", "card", "card2", "hover", "accent", "accent_h", "text", "muted",
+             "green", "red", "seg_on", "seg_on_h", "on_accent")
+
+
+def _palette():
+    return dict(zip(PAL_NAMES, (BG, CARD, CARD2, HOVER, ACCENT, ACCENT_H, TEXT, MUTED,
+                                GREEN, RED, SEG_ON, SEG_ON_H, ON_ACCENT)))
+
+
+COLOR_ATTRS = ("fg_color", "text_color", "hover_color", "button_color", "button_hover_color",
+               "button_fg_color", "dropdown_fg_color", "dropdown_hover_color",
+               "dropdown_text_color", "dropdown_border_color", "progress_color", "border_color",
+               "selected_color", "selected_hover_color", "unselected_color",
+               "unselected_hover_color", "scrollbar_color", "scrollbar_hover_color",
+               "scrollbar_button_color", "scrollbar_button_hover_color", "label_fg_color",
+               "label_text_color", "radiobutton_color", "radiobutton_hover_color",
+               "top_fg_color", "trough_color")
+
+
+def _swap_colors(widget, pairs):
+    # _bg_color (parent colour, cached at creation) feeds canvas bg and the
+    # fill of transparent frames; transparent-fg widgets skip the fg swap
+    # below, so update it here and force a redraw so it takes effect.
+    bg_changed = False
+    bg = getattr(widget, "_bg_color", None)
+    if isinstance(bg, str) and bg.startswith("#"):
+        lb = bg.lower()
+        for old, new in pairs:
+            if lb == old:
+                widget._bg_color = new
+                bg_changed = True
+                break
+    # Plain tkinter widgets (e.g. CTkScrollableFrame) hide the tk "bg"
+    # option behind CTk's whitelisted cget/configure; reach past it.
+    tkbg = None
+    try:
+        tkbg = widget.cget("bg")
+    except Exception:
+        try:
+            tkbg = tk.Misc.cget(widget, "bg")
+        except Exception:
+            tkbg = None
+    if isinstance(tkbg, str) and tkbg.startswith("#"):
+        lt = tkbg.lower()
+        for old, new in pairs:
+            if lt == old:
+                try:
+                    widget.configure(bg=new)
+                except Exception:
+                    try:
+                        tk.Misc.configure(widget, bg=new)
+                    except Exception:
+                        pass
+                bg_changed = True
+                break
+    for a in COLOR_ATTRS:
+        try:
+            v = widget.cget(a)
+        except Exception:
+            continue
+        if isinstance(v, str) and v.startswith("#"):
+            lv = v.lower()
+            for old, new in pairs:
+                if lv == old:
+                    try:
+                        widget.configure(**{a: new})
+                    except Exception:
+                        pass
+                    break
+    if bg_changed:
+        try:
+            widget._draw()
+        except Exception:
+            pass
+    for ch in widget.winfo_children():
+        _swap_colors(ch, pairs)
 
 
 set_theme("dark")
@@ -647,10 +750,6 @@ def pick_formats(info, mode, cap, container):
         return {"fmt": "bestaudio/best", "sizes": [_fsize(best, dur)] if best else [0],
                 "height": 0, "fps": 0, "ext": container, "abr": (best or {}).get("abr") or 0}
 
-    def within(lst):
-        ok = [f for f in lst if not cap or f["height"] <= cap]
-        return ok or ([min(lst, key=lambda f: f["height"])] if lst else [])
-
     def compat(f):
         if container == "mp4":
             if str(f.get("vcodec", "")).startswith(("avc1", "h264")):
@@ -662,19 +761,107 @@ def pick_formats(info, mode, cap, container):
 
     key = lambda f: (f["height"], compat(f), f.get("fps") or 0, f.get("tbr") or 0)
 
-    if v_only and a_only:
-        vid = max(within(v_only), key=key)
+    def dash_pair(vid):
         want = {"mp4": "m4a", "webm": "webm"}.get(container)
-        aud = max(a_only, key=lambda f: (1 if f.get("ext") == want else 0, f.get("abr") or f.get("tbr") or 0))
+        aud = max(a_only, key=lambda f: (1 if f.get("ext") == want else 0,
+                                         f.get("abr") or f.get("tbr") or 0))
         return {"fmt": f"{vid['format_id']}+{aud['format_id']}",
                 "sizes": [_fsize(vid, dur), _fsize(aud, dur)],
-                "height": vid["height"], "fps": vid.get("fps") or 0, "ext": container, "abr": 0}
-    if combined:
-        f = max(within(combined), key=key)
+                "height": vid["height"], "fps": vid.get("fps") or 0,
+                "ext": container, "abr": 0}
+
+    def comb_pick(f):
         return {"fmt": f["format_id"], "sizes": [_fsize(f, dur)], "height": f["height"],
                 "fps": f.get("fps") or 0, "ext": f.get("ext") or container, "abr": 0}
+
+    if not cap:
+        if v_only and a_only:
+            return dash_pair(max(v_only, key=key))
+        if combined:
+            return comb_pick(max(combined, key=key))
+    else:
+        # honour the cap across DASH and combined streams (a 1080p DASH pair
+        # must not win over a combined stream that actually fits the cap)
+        cands = ([("v", f) for f in v_only] if a_only else []) + [("c", f) for f in combined]
+        if cands:
+            ok = [t for t in cands if t[1]["height"] <= cap]
+            if ok:
+                tag, f = max(ok, key=lambda t: (t[1]["height"], t[0] == "v",
+                                                t[1].get("fps") or 0, t[1].get("tbr") or 0))
+            else:
+                tag, f = min(cands, key=lambda t: (t[1]["height"], t[0] != "v"))
+            return dash_pair(f) if tag == "v" else comb_pick(f)
     return {"fmt": "bv*+ba/b", "sizes": [0], "height": info.get("height") or 0,
             "fps": info.get("fps") or 0, "ext": container, "abr": 0}
+
+
+def available_text(info, mode):
+    fmts = info.get("formats") or []
+    if mode == "audio":
+        brs = sorted({int(f.get("abr") or f.get("tbr") or 0) for f in fmts
+                      if f.get("acodec") not in (None, "none") and (f.get("abr") or f.get("tbr"))},
+                     reverse=True)
+        return ("Available: " + ", ".join(f"{b} kbps" for b in brs if b)) if brs else ""
+    opts = res_options(info)
+    if not opts:
+        return "No video streams found (audio only)."
+    return "Available: " + ", ".join(label for label, _ in opts)
+
+
+def res_options(info):
+    heights = {}
+    for f in info.get("formats") or []:
+        h = f.get("height")
+        if h and f.get("vcodec") not in (None, "none"):
+            heights[h] = max(heights.get(h, 0), f.get("fps") or 0)
+    return [(f"{h}p" + (str(int(round(fps))) if fps and round(fps) > 30 else ""), h)
+            for h, fps in sorted(heights.items(), reverse=True)]
+
+
+SLIM_KEYS = ("format_id", "ext", "width", "height", "fps", "vcodec", "acodec", "filesize",
+             "filesize_approx", "tbr", "vbr", "abr", "format_note", "quality", "protocol",
+             "source_preference", "preference", "language")
+
+
+def slim_info(info):
+    """Keep only what pick_formats needs so per-row resolution changes stay cheap."""
+    return {"duration": info.get("duration"), "height": info.get("height"),
+            "fps": info.get("fps"),
+            "formats": [{k: f[k] for k in SLIM_KEYS if k in f}
+                        for f in info.get("formats") or []]}
+
+
+def find_partial(outdir, since=0.0):
+    """Newest .part / .aria2 left in outdir by yt-dlp or aria2c (resume files)."""
+    try:
+        best, bt = None, 0.0
+        for n in os.listdir(outdir):
+            if not n.endswith((".part", ".aria2")):
+                continue
+            p = os.path.join(outdir, n)
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            if mt >= since - 2 and mt >= bt:
+                best, bt = p, mt
+        return best
+    except OSError:
+        return None
+
+
+def discard_partial(path):
+    """Delete a resume file plus its paired control file (.part <-> .aria2)."""
+    if not path:
+        return
+    cands = {path}
+    cands.add(path[:-6] if path.endswith(".aria2") else path + ".aria2")
+    for c in cands:
+        try:
+            if os.path.isfile(c):
+                os.remove(c)
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -696,6 +883,12 @@ class Job:
         self.ext_label = fmt
         self.fmt_sel = None
         self.stream_sizes = [0]
+        self.available = ""
+        self.res_list = []
+        self.info_slim = None
+        self.partial = None
+        self.auto_go = False
+        self.dl_started = 0.0
         self.thumb_path = None
         self.path = None
         self.error = ""
@@ -756,8 +949,14 @@ def rounded(img, radius=20):
 
 
 def to_ctk(pil):
-    pil = rounded(pil)
-    return ctk.CTkImage(light_image=pil, dark_image=pil, size=(THUMB_W, THUMB_H))
+    # Bake the rounded corners onto the row colour so Tk blits an opaque RGB
+    # image (alpha thumbnails re-composite on every scroll expose = flicker).
+    img = pil.convert("RGB")
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, img.width - 1, img.height - 1), radius=20, fill=255)
+    bg = Image.new("RGB", img.size, CARD)
+    bg.paste(img, (0, 0), mask)
+    return ctk.CTkImage(light_image=bg, dark_image=bg, size=(THUMB_W, THUMB_H))
 
 
 def fetch_thumb(url, cache_path):
@@ -782,7 +981,7 @@ class Row(ctk.CTkFrame):
         self.columnconfigure(1, weight=1)
 
         self.thumb = ctk.CTkLabel(self, text="", image=app.placeholder, width=THUMB_W, height=THUMB_H)
-        self.thumb.grid(row=0, column=0, rowspan=3, padx=12, pady=12)
+        self.thumb.grid(row=0, column=0, rowspan=4, padx=12, pady=12)
 
         self.title = ctk.CTkLabel(self, text="", anchor="w", justify="left", wraplength=480,
                                   font=ctk.CTkFont(size=14, weight="bold"), text_color=TEXT)
@@ -791,8 +990,11 @@ class Row(ctk.CTkFrame):
         self.meta = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=12))
         self.meta.grid(row=1, column=1, sticky="ew", pady=(2, 0))
 
+        self.avail = ctk.CTkLabel(self, text="", anchor="w", justify="left", wraplength=560,
+                                  text_color=MUTED, font=ctk.CTkFont(size=11))
+
         self.pf = ctk.CTkFrame(self, fg_color="transparent")
-        self.pf.grid(row=2, column=1, sticky="ew", pady=(6, 12), padx=(0, 8))
+        self.pf.grid(row=3, column=1, sticky="ew", pady=(6, 12), padx=(0, 8))
         self.bar = ctk.CTkProgressBar(self.pf, height=6, progress_color=ACCENT, fg_color=BG)
         self.bar.set(0)
         self.status = ctk.CTkLabel(self.pf, text="", anchor="w", font=ctk.CTkFont(size=12), text_color=MUTED)
@@ -836,9 +1038,27 @@ class Row(ctk.CTkFrame):
             w.destroy()
 
         st = j.state
+        if j.available:
+            self.avail.configure(text=j.available)
+            self.avail.grid(row=2, column=1, sticky="ew", pady=(2, 0))
+        else:
+            self.avail.grid_remove()
         if st == "ready":
             self._show_bar(False)
             self.status.configure(text="Ready to download", text_color=MUTED)
+            if j.mode == "video" and getattr(j, "res_list", None):
+                labels = ["Best"] + [lb for lb, _ in j.res_list]
+                cur = "Best"
+                if j.cap:
+                    for lb, h in j.res_list:
+                        if h == j.cap:
+                            cur = lb
+                menu = ctk.CTkOptionMenu(self.actions, values=labels, width=96, height=30,
+                                         corner_radius=8, fg_color=CARD2, button_color=HOVER,
+                                         text_color=TEXT, font=ctk.CTkFont(size=12),
+                                         command=lambda v, job=j: app.set_job_res(job, v))
+                menu.set(cur)
+                menu.pack(pady=3)
             self._btn("Download", lambda: app.start_job(j), accent=True)
             self._btn("Remove", lambda: app.remove_job(j))
         elif st == "fetching":
@@ -855,7 +1075,10 @@ class Row(ctk.CTkFrame):
             self._btn("Cancel", lambda: app.cancel_job(j))
         elif st == "paused":
             self._show_bar(True)
-            self.status.configure(text=f"Paused · {int((j.frac or 0) * 100)}%", text_color=MUTED)
+            if j.partial and not (j.frac or 0):
+                self.status.configure(text="Partial file on disk · Resume to continue", text_color=MUTED)
+            else:
+                self.status.configure(text=f"Paused · {int((j.frac or 0) * 100)}%", text_color=MUTED)
             self._btn("Resume", lambda: app.resume_job(j), accent=True)
             self._btn("Remove", lambda: app.remove_job(j))
         elif st == "processing":
@@ -888,6 +1111,10 @@ class Row(ctk.CTkFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
+        # CTk recolors the titlebar by withdraw() + deiconify() — that hide/show
+        # cycle is what flashed the window on every theme change. Skip it and
+        # set the DWM attribute directly instead (_apply_titlebar).
+        self._deactivate_windows_window_header_manipulation = True
         self.s = {**DEFAULTS, **load_json(SETTINGS_FILE, {})}
         if not os.path.isdir(self.s["outdir"]):
             self.s["outdir"] = DEFAULTS["outdir"]
@@ -896,6 +1123,7 @@ class App(ctk.CTk):
         set_theme(self.theme)
         apply_accent(self.s.get("accent"))
         ctk.set_appearance_mode(self.theme)
+        self._apply_titlebar()
         self.title(APP_NAME)
         self.geometry("1000x740")
         self.minsize(860, 580)
@@ -917,6 +1145,7 @@ class App(ctk.CTk):
         self._build()
         self._apply_mode()
         self._load_history()
+        self._restore_active()
         self._relayout()
 
         for _ in range(3):
@@ -952,39 +1181,80 @@ class App(ctk.CTk):
         name = "light" if str(name).lower() == "light" else "dark"
         if name == self.theme:
             return
+        old = _palette()
         self.theme = name
         self.s["theme"] = name
         self.save_settings()
         set_theme(name)
         ctk.set_appearance_mode(name)
-        self._rebuild_ui()
+        self._apply_titlebar()
+        self._restyle_ui(old)
 
-    def _rebuild_ui(self):
-        self.configure(fg_color=BG)
-        self.placeholder = to_ctk(Image.new("RGB", (THUMB_W * 2, THUMB_H * 2), CARD2))
+    def _apply_titlebar(self):
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+            val = ctypes.c_int(1 if self.theme == "dark" else 0)
+            dwm = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            for attr in (20, 19):
+                if dwm(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                    break
+        except Exception:
+            pass
+
+    def _restyle_ui(self, old):
+        # Recolour widgets in place; destroying/rebuilding them flashed the window.
+        new = _palette()
+        pairs = [(old[k].lower(), new[k].lower()) for k in PAL_NAMES if old[k] != new[k]]
         for w in self.winfo_children():
-            if isinstance(w, ctk.CTkToplevel):
-                continue
-            w.destroy()
-        self._build()
-        self._apply_mode()
-        if self.ready:
-            self.banner.pack_forget()
-            self.btn_paste.configure(state="normal")
-            self.btn_download.configure(state="normal")
-        else:
-            text, frac, error = self._banner_state
-            self._banner(text, frac, error)
-            if error:
-                self.banner_retry.pack(anchor="w", padx=16, pady=(0, 12))
+            _swap_colors(w, pairs)
+        if getattr(self, "btn_theme", None):
+            self.btn_theme.configure(text="☀  Light" if self.theme == "dark" else "☾  Dark")
+        dl_file = "icon-download-inv.svg" if ON_ACCENT == "#FFFFFF" else "icon-download.svg"
+        self._ico_dl = self._load_icon(dl_file, (18, 18))
+        self._ico_paste = self._load_icon("icon-paste.svg", (18, 18))
+        self._ico_accent = self._load_icon("icon-accent.svg", (18, 18))
+        self._ico_settings = self._load_icon("icon-settings.svg", (20, 20))
+        for btn, ico in ((getattr(self, "btn_download", None), self._ico_dl),
+                         (getattr(self, "btn_paste", None), self._ico_paste),
+                         (getattr(self, "btn_accent", None), self._ico_accent),
+                         (getattr(self, "btn_settings", None), self._ico_settings)):
+            if btn is not None and ico is not None:
+                btn.configure(image=ico)
+        self.placeholder = to_ctk(Image.new("RGB", (THUMB_W * 2, THUMB_H * 2), CARD2))
         for j in self.jobs:
-            j.row = Row(self.listf, self, j)
+            if j.row is None:
+                continue
             if j.thumb_path and os.path.exists(j.thumb_path):
                 try:
                     j.row.set_thumb(Image.open(j.thumb_path).convert("RGB"))
                 except Exception:
                     pass
-        self._relayout()
+            elif getattr(j.row, "_img", None) is None:
+                j.row.thumb.configure(image=self.placeholder)
+        try:
+            self.listf._parent_canvas.configure(bg=BG)
+        except Exception:
+            pass
+        self._style_scrollbar()
+        # Root background last, then force one synchronous full paint so the
+        # window never shows an erased (blank) frame mid-transition.
+        self.configure(fg_color=BG)
+        self.update_idletasks()
+
+    def _style_scrollbar(self):
+        # Native ttk scrollbar: CTkScrollbar redraws itself (and forces
+        # update_idletasks) on every scroll tick, which stutters/flickers.
+        try:
+            style = ttk.Style(self)
+            try:
+                style.theme_use("clam")
+            except Exception:
+                pass
+            style.configure("Vertical.TScrollbar", background=CARD2, troughcolor=BG,
+                            bordercolor=BG, arrowcolor=MUTED, activebackground=HOVER)
+            style.map("Vertical.TScrollbar", background=[("active", HOVER)])
+        except Exception:
+            pass
 
     def set_accent(self, hexv):
         if hexv is not None and str(hexv).strip():
@@ -995,10 +1265,11 @@ class App(ctk.CTk):
             hexv = clean
         else:
             hexv = None
+        old = _palette()
         self.s["accent"] = hexv
         self.save_settings()
         apply_accent(hexv)
-        self._rebuild_ui()
+        self._restyle_ui(old)
         self.flash("Accent: " + (hexv or "theme default"))
         self._refresh_accent_win()
         return True
@@ -1288,6 +1559,12 @@ class App(ctk.CTk):
 
     def _on_close(self):
         for j in self.jobs:
+            if j.state == "downloading":
+                p = find_partial(j.outdir, j.dl_started or 0)
+                if p:
+                    j.partial = p
+        self._active_write()
+        for j in self.jobs:
             kill_tree(j.proc)
         self.destroy()
 
@@ -1400,6 +1677,19 @@ class App(ctk.CTk):
 
         self.listf = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.listf.pack(fill="both", expand=True, padx=14, pady=(2, 6))
+        try:
+            ctk_sb = self.listf._scrollbar
+            info = ctk_sb.grid_info()
+            ctk_sb.grid_remove()
+            info.pop("in", None)
+            self._vscroll = ttk.Scrollbar(self.listf._parent_frame, orient="vertical",
+                                          command=self.listf._parent_canvas.yview,
+                                          style="Vertical.TScrollbar")
+            self._vscroll.grid(**info)
+            self.listf._parent_canvas.configure(yscrollcommand=self._vscroll.set, bg=BG)
+        except Exception:
+            self._vscroll = None
+        self._style_scrollbar()
         self.empty = ctk.CTkFrame(self.listf, fg_color="transparent")
         ctk.CTkLabel(self.empty, text="Copy a video link from your browser",
                      text_color=MUTED, font=F(size=14)).pack(pady=(0, 12))
@@ -1619,6 +1909,24 @@ class App(ctk.CTk):
             self._pump()
             self._update_dl_btn()
 
+    def set_job_res(self, job, label):
+        if job.state != "ready" or not getattr(job, "res_list", None):
+            return
+        if label in (None, "", "Best"):
+            job.cap = 0
+        else:
+            match = [h for lb, h in job.res_list if lb == label]
+            if not match:
+                return
+            job.cap = match[0]
+        if job.info_slim:
+            sel = pick_formats(job.info_slim, job.mode, job.cap, job.fmt)
+            job.height, job.fps, job.fmt_sel = sel["height"], sel["fps"], sel["fmt"]
+            job.stream_sizes = sel["sizes"]
+            job.ext_label = sel["ext"]
+            job.size = sum(sel["sizes"]) or job.size
+        job.row.refresh()
+
     def _add_links(self, text, err):
         urls = re.findall(r"https?://[^\s]+", text or "")
         if not urls:
@@ -1700,6 +2008,9 @@ class App(ctk.CTk):
             return
 
         sel = pick_formats(info, job.mode, job.cap, job.fmt)
+        job.available = available_text(info, job.mode)
+        job.info_slim = slim_info(info)
+        job.res_list = res_options(info) if job.mode == "video" else []
         job.title = info.get("title") or job.url
         job.uploader = info.get("uploader") or info.get("channel") or ""
         job.duration = info.get("duration") or 0
@@ -1726,6 +2037,13 @@ class App(ctk.CTk):
             return
         if img is not None:
             job.row.set_thumb(img)
+        if job.auto_go:
+            job.auto_go = False
+            job.state = "queued"
+            job.row.refresh()
+            self._update_dl_btn()
+            self._pump()
+            return
         job.state = "ready"
         job.row.refresh()
         self._update_dl_btn()
@@ -1814,6 +2132,8 @@ class App(ctk.CTk):
 
     def _download_worker(self, job, use_aria=True):
         started = time.time()
+        job.dl_started = started
+        last_scan = started
         final = guess = None
         n_dest = 0
         tail = []
@@ -1828,6 +2148,12 @@ class App(ctk.CTk):
                     continue
                 tail.append(line)
                 tail = tail[-12:]
+                if time.time() - last_scan > 3.0:
+                    last_scan = time.time()
+                    p = find_partial(job.outdir, started)
+                    if p and job.partial != p:
+                        job.partial = p
+                        self.post(self._active_write)
                 pg = parse_progress(line)
                 if pg is not None:
                     if time.time() - last_post < 0.15:
@@ -1913,15 +2239,20 @@ class App(ctk.CTk):
         job.pause = False
         if ok:
             job.state, job.path, job.size_est = "done", path, False
+            job.partial = None
             if path and os.path.exists(path):
                 job.size = os.path.getsize(path)
                 job.ext_label = os.path.splitext(path)[1].lstrip(".") or job.ext_label
             self._save_history()
         elif msg == "cancelled":
             job.state = "cancelled"
+            discard_partial(job.partial)
+            job.partial = None
         else:
             job.state, job.error = "error", msg
+            job.partial = find_partial(job.outdir, job.dl_started or 0)
         job.row.refresh()
+        self._active_write()
         self._pump()
         self._update_dl_btn()
 
@@ -1929,9 +2260,12 @@ class App(ctk.CTk):
     def cancel_job(self, job):
         job.cancel = True
         kill_tree(job.proc)
+        discard_partial(job.partial)
+        job.partial = None
         if job.state in ("fetching", "queued", "ready", "paused"):
             job.state = "cancelled"
             job.row.refresh()
+        self._active_write()
 
     def pause_job(self, job):
         if job.state != "downloading" or job.pause:
@@ -1949,16 +2283,22 @@ class App(ctk.CTk):
             self.flash("Resuming…")
             self._pump()
         else:
+            job.auto_go = True
             job.state = "fetching"
             job.row.refresh()
             self.info_q.put(job)
+        self._active_write()
 
     def _paused(self, job):
         if job not in self.jobs:
             self._pump()
             return
+        p = find_partial(job.outdir, job.dl_started or 0)
+        if p:
+            job.partial = p
         job.state = "paused"
         job.row.refresh()
+        self._active_write()
         self._pump()
 
     def retry_job(self, job):
@@ -1977,17 +2317,81 @@ class App(ctk.CTk):
             return
         job.cancel = True
         kill_tree(job.proc)
+        discard_partial(job.partial)
+        job.partial = None
         self.jobs.remove(job)
         job.row.destroy()
         self._relayout()
         self._save_history()
+        self._active_write()
 
     def clear_completed(self):
         for j in [j for j in self.jobs if j.state in ("done", "cancelled", "error")]:
             self.jobs.remove(j)
+            discard_partial(j.partial)
+            j.partial = None
             j.row.destroy()
         self._relayout()
         self._save_history()
+        self._active_write()
+
+    # ---- active downloads (restore after a crash / restart) ------------------ #
+    def _active_write(self):
+        items = []
+        for j in self.jobs:
+            if j.state == "done" or j.state == "cancelled":
+                continue
+            if not j.partial and j.state not in ("downloading", "queued", "paused"):
+                continue
+            items.append({"url": j.url, "mode": j.mode, "cap": j.cap, "fmt": j.fmt,
+                          "bitrate": j.bitrate, "outdir": j.outdir, "title": j.title,
+                          "uploader": j.uploader, "duration": j.duration, "size": j.size,
+                          "height": j.height, "fps": j.fps, "ext_label": j.ext_label,
+                          "thumb_path": j.thumb_path, "ts": j.ts, "id": j.id,
+                          "seq": j.seq, "partial": j.partial, "frac": j.frac or 0})
+        try:
+            save_json(ACTIVE_FILE, items)
+        except Exception:
+            pass
+
+    def _restore_active(self):
+        items = load_json(ACTIVE_FILE, [])
+        if not isinstance(items, list):
+            return
+        added = 0
+        for d in items:
+            try:
+                if not isinstance(d, dict) or not d.get("url"):
+                    continue
+                if any(getattr(j, "url", "") == d["url"]
+                       and getattr(j, "outdir", "") == (d.get("outdir") or "")
+                       for j in self.jobs):
+                    continue
+                j = Job(d["url"], d.get("mode", "video"), d.get("cap") or 0,
+                        d.get("fmt") or "mp4", d.get("bitrate"),
+                        d.get("outdir") or self.s["outdir"])
+                for k in ("title", "uploader", "duration", "size", "height", "fps",
+                          "ext_label", "thumb_path", "ts", "id", "seq"):
+                    if d.get(k) is not None:
+                        setattr(j, k, d[k])
+                j.frac = d.get("frac") or 0
+                part = d.get("partial")
+                j.partial = part if part and os.path.exists(part) else None
+                j.state = "paused" if j.partial else "ready"
+                j.row = Row(self.listf, self, j)
+                if j.thumb_path and os.path.exists(j.thumb_path):
+                    try:
+                        j.row.set_thumb(Image.open(j.thumb_path).convert("RGB"))
+                    except Exception:
+                        pass
+                self.jobs.append(j)
+                added += 1
+            except Exception:
+                continue
+        if added:
+            self._relayout()
+            self.flash(f"Restored {added} unfinished download{'s' if added != 1 else ''}.")
+            self._update_dl_btn()
 
     # ---- history ------------------------------------------------------------- #
     def _save_history(self):
