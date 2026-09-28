@@ -9,8 +9,10 @@ Run from source:   python ytdl_gui.py      (Windows: pythonw ytdl_gui.py = no co
 Build an .exe:     see README.md / .github/workflows/build.yml
 """
 
+import colorsys
 import io
 import json
+import math
 import os
 import platform
 import queue
@@ -80,17 +82,191 @@ for _d in (BIN_DIR, THUMB_DIR):
 
 UA = {"User-Agent": "Mozilla/5.0 (YT-Downloader)"}
 
-# Theme
-BG = "#121417"
-CARD = "#1c1f24"
-CARD2 = "#262a31"
-HOVER = "#30353d"
-ACCENT = "#FFD23F"
-ACCENT_H = "#F2BF1B"
-TEXT = "#E8EAED"
-MUTED = "#8B929C"
-GREEN = "#4CD08A"
-RED = "#FF6B6B"
+# Theme ---------------------------------------------------------------------------
+PALETTES = {
+    "dark": {
+        "bg": "#121417", "card": "#1c1f24", "card2": "#262a31", "hover": "#30353d",
+        "accent": "#FFD23F", "accent_h": "#F2BF1B", "text": "#E8EAED", "muted": "#8B929C",
+        "green": "#4CD08A", "red": "#FF6B6B", "seg_on": "#3B4250", "seg_on_h": "#465063",
+        "on_accent": "#1a1a1a",
+    },
+    "light": {
+        "bg": "#EEF1F5", "card": "#FFFFFF", "card2": "#E2E7ED", "hover": "#D3D9E1",
+        "accent": "#F0B90B", "accent_h": "#D9A700", "text": "#1B1F26", "muted": "#69727E",
+        "green": "#16A46B", "red": "#E04B4B", "seg_on": "#C9D1DB", "seg_on_h": "#B8C2CE",
+        "on_accent": "#1a1a1a",
+    },
+}
+ACCENT_PRESETS = [
+    ("Default", None),
+    ("Acid Lime", "#C6FF00"), ("Amethyst", "#B14AED"), ("Amber", "#FFB300"),
+    ("Aquamarine", "#7FFFD4"), ("Abyss", "#1B1F24"), ("Atomic Purple", "#7C3AED"),
+    ("Breaking Bad", "#3F9142"), ("Brick", "#C74B50"), ("Carbon", "#333333"),
+    ("Coffee", "#6F4E37"), ("Cyan", "#00BCD4"), ("Daisy", "#FFDD55"),
+    ("Dodgers Blue", "#0073E6"), ("Fuchsia", "#FF0090"), ("Graphite", "#5C5C5C"),
+    ("Indigo", "#3F51B5"), ("Lavender", "#B57EDC"), ("Light", "#FFFFFF"),
+    ("Lime", "#32CD32"), ("Neon", "#00E676"), ("Oceanic", "#2E5266"),
+    ("Orange", "#FF8C00"), ("Palenight", "#546E7A"), ("Plant", "#7CB342"),
+    ("Porpoise", "#577277"), ("Sky", "#38BDF8"),
+]
+ACCENT_OVERRIDE = {"hex": None}
+_CUR_THEME = {"name": "dark"}
+BG = CARD = CARD2 = HOVER = ACCENT = ACCENT_H = TEXT = MUTED = GREEN = RED = ""
+SEG_ON = SEG_ON_H = ON_ACCENT = "#1a1a1a"
+
+
+def _hex_rgb(h):
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_hex(rgb):
+    return "#%02X%02X%02X" % tuple(max(0, min(255, int(round(c)))) for c in rgb)
+
+
+def _shade(h, f):
+    return _rgb_hex([c * f for c in _hex_rgb(h)])
+
+
+def _mix(a, b, t):
+    ra, rb = _hex_rgb(a), _hex_rgb(b)
+    return _rgb_hex([ra[i] * t + rb[i] * (1 - t) for i in range(3)])
+
+
+def _lum(h):
+    r, g, b = (c / 255 for c in _hex_rgb(h))
+    r, g, b = ([c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)])
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def normalize_hex(v):
+    v = str(v).strip()
+    if not re.match(r"^#?[0-9a-fA-F]{6}$", v):
+        return None
+    return "#" + v.lstrip("#").upper()
+
+
+def hsv_hex(h, s, v):
+    r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, max(0.0, min(1.0, s)), max(0.0, min(1.0, v)))
+    return "#%02X%02X%02X" % (round(r * 255), round(g * 255), round(b * 255))
+
+
+def _disc_img(color, size=40):
+    """Filled circle PNG with a faint dark rim so light swatches stay visible."""
+    big = size * 4
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((0, 0, big - 1, big - 1), fill=color,
+                                outline=(0, 0, 0, 90), width=6)
+    return img
+
+
+def _disc(color, size=40):
+    img = _disc_img(color, size)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+
+
+_RAINBOW_CACHE = {}
+
+
+def _rainbow_img(size=40):
+    """Tiny HSV wheel disc used by the 'Custom' swatch."""
+    if size in _RAINBOW_CACHE:
+        return _RAINBOW_CACHE[size]
+    big = size * 4
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    px = img.load()
+    c = (big - 1) / 2.0
+    for y in range(big):
+        dy = y - c
+        for x in range(big):
+            dx = x - c
+            dist = math.hypot(dx, dy)
+            if dist > c:
+                continue
+            hue = (math.degrees(math.atan2(dy, dx)) + 90.0) % 360.0
+            r, g, b = colorsys.hsv_to_rgb(hue / 360.0, min(dist / c, 1.0), 1.0)
+            px[x, y] = (round(r * 255), round(g * 255), round(b * 255), 255)
+    ImageDraw.Draw(img).ellipse((0, 0, big - 1, big - 1), outline=(0, 0, 0, 90), width=6)
+    _RAINBOW_CACHE[size] = img
+    return img
+
+
+def _rainbow_disc(size=40):
+    try:
+        p = resource_path(os.path.join("assets", "icon-accent.png"))
+        if os.path.exists(p):
+            img = Image.open(p).convert("RGBA")
+            return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+    except Exception:
+        pass
+    img = _rainbow_img(size)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+
+
+_WHEEL_CACHE = {}
+
+
+def _wheel_img(size=190, ss=2):
+    """HSV wheel: hue by angle (0° at top, clockwise), saturation by radius."""
+    key = (size, ss)
+    if key not in _WHEEL_CACHE:
+        big = size * ss
+        img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        px = img.load()
+        c = (big - 1) / 2.0
+        for y in range(big):
+            dy = y - c
+            for x in range(big):
+                dx = x - c
+                dist = math.hypot(dx, dy)
+                if dist > c:
+                    continue
+                hue = (math.degrees(math.atan2(dy, dx)) + 90.0) % 360.0
+                r, g, b = colorsys.hsv_to_rgb(hue / 360.0, min(dist / c, 1.0), 1.0)
+                px[x, y] = (round(r * 255), round(g * 255), round(b * 255), 255)
+        _WHEEL_CACHE[key] = img.resize((size, size), Image.LANCZOS)
+    return _WHEEL_CACHE[key]
+
+
+def _bar_img(h, s, w=190, hgt=16):
+    """Black (left) → full value (right) gradient for a hue/saturation."""
+    img = Image.new("RGB", (w, hgt))
+    d = ImageDraw.Draw(img)
+    for x in range(w):
+        r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, max(0.0, min(1.0, s)), x / (w - 1))
+        d.line((x, 0, x, hgt - 1), fill=(round(r * 255), round(g * 255), round(b * 255)))
+    return img
+
+
+def _derive_accent():
+    global ACCENT, ACCENT_H, ON_ACCENT, SEG_ON, SEG_ON_H
+    ACCENT = ACCENT_OVERRIDE["hex"] or PALETTES[_CUR_THEME["name"]]["accent"]
+    ACCENT_H = _shade(ACCENT, 0.86)
+    ON_ACCENT = "#1a1a1a" if _lum(ACCENT) > 0.55 else "#FFFFFF"
+    SEG_ON = _mix(ACCENT, CARD, 0.40)
+    SEG_ON_H = _mix(ACCENT, CARD, 0.60)
+
+
+def apply_accent(hexv):
+    ACCENT_OVERRIDE["hex"] = normalize_hex(hexv) if hexv else None
+    _derive_accent()
+
+
+def set_theme(name):
+    """Point the module-level colour constants at a palette (dark / light)."""
+    global BG, CARD, CARD2, HOVER, ACCENT, ACCENT_H, TEXT, MUTED, GREEN, RED
+    global SEG_ON, SEG_ON_H, ON_ACCENT
+    key = "light" if str(name).lower() == "light" else "dark"
+    _CUR_THEME["name"] = key
+    p = PALETTES[key]
+    BG, CARD, CARD2, HOVER = p["bg"], p["card"], p["card2"], p["hover"]
+    ACCENT, ACCENT_H, TEXT, MUTED = p["accent"], p["accent_h"], p["text"], p["muted"]
+    GREEN, RED, SEG_ON, SEG_ON_H = p["green"], p["red"], p["seg_on"], p["seg_on_h"]
+    ON_ACCENT = p["on_accent"]
+    _derive_accent()
+
+
+set_theme("dark")
 
 QUALITY_V = {"Highest": 0, "4K · 2160p": 2160, "1440p": 1440, "1080p": 1080,
              "720p": 720, "480p": 480, "360p": 360}
@@ -104,7 +280,13 @@ DEFAULTS = {
     "f_video": "MP4", "f_audio": "MP3",
     "outdir": str(Path.home() / "Downloads"),
     "parallel": 2, "embed_meta": True, "embed_thumb": False,
+    "theme": "dark", "accent": None,
 }
+
+# Multi-segment downloading: aria2c splits each file into SEGMENTS ranged parts,
+# FRAG_THREADS covers HLS/DASH streams that are split into fragments.
+SEGMENTS = 16
+FRAG_THREADS = 8
 
 
 def resource_path(rel):
@@ -238,6 +420,52 @@ def fmt_size(n):
         n /= 1024
 
 
+def to_bytes(tok):
+    """'5.4MiB' / '712KiB' / '12345' -> bytes (float)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([KMGTPE]?)i?B?", (tok or "").strip(), re.I)
+    if not m:
+        return 0.0
+    scale = {"": 1, "K": 1024, "M": 1048576, "G": 1073741824,
+             "T": 1099511627776, "P": 1125899906842624, "E": 1152921504606846976}
+    return float(m.group(1)) * scale.get(m.group(2).upper(), 1)
+
+
+def to_secs(tok):
+    """'45s' / '1m20s' / '2h' / '--' -> seconds (float)."""
+    if not tok or tok in ("--", "-", "?"):
+        return 0.0
+    units = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+    found = re.findall(r"(\d+)([dhms])", tok)
+    return sum(float(v) * units[u] for v, u in found) if found else 0.0
+
+
+ARIA_RE = re.compile(r"#\S+\s+(\d+(?:\.\d+)?[KMGTPE]?i?B)/(\d+(?:\.\d+)?[KMGTPE]?i?B)\((\d+)%\)"
+                     r"(?:[^\]]*?DL:(\d+(?:\.\d+)?[KMGTPE]?i?B))?(?:[^\]]*?ETA:([^\]\s]+))?")
+
+
+def parse_progress(line):
+    """Return (downloaded, total, speed, eta) for a yt-dlp or aria2c progress line."""
+    if line.startswith("[PROG]"):
+        parts = line.split()[1:6]
+        if len(parts) < 5:
+            return None
+        d, t, est, sp, eta = (num(x) for x in parts)
+        return d, (t or est), sp, eta
+    if line.startswith("[#"):        # aria2c multi-segment readout
+        m = ARIA_RE.search(line)
+        if not m:
+            return None
+        d, tot = to_bytes(m.group(1)), to_bytes(m.group(2))
+        if not tot and m.group(3):
+            tot = d * 100 / int(m.group(3))
+        return d, tot, to_bytes(m.group(4)), to_secs(m.group(5))
+    return None
+
+
+def num(x):
+    return float(x) if x and re.fullmatch(r"[\d.]+(e[+-]?\d+)?", x) else 0.0
+
+
 def fmt_dur(sec):
     try:
         sec = int(sec)
@@ -363,6 +591,22 @@ def install_deno(cb=None):
         archive.unlink(missing_ok=True)
 
 
+def install_aria2(cb=None):
+    """aria2c - multi-segment HTTP downloader, splits every file into SEGMENTS parts."""
+    if not IS_WIN:
+        raise RuntimeError("aria2c is not bundled for this OS; install it from your package manager")
+    url = ("https://github.com/aria2/aria2/releases/download/release-1.37.0/"
+           "aria2-1.37.0-win-64bit-build1.zip")
+    archive = APP_DIR / "aria2.tmp"
+    try:
+        download_file(url, archive, cb)
+        _extract_zip_members(archive, ("aria2c" + EXE,))
+    finally:
+        archive.unlink(missing_ok=True)
+    if not (BIN_DIR / ("aria2c" + EXE)).exists():
+        raise RuntimeError("aria2c extraction failed")
+
+
 # --------------------------------------------------------------------------- #
 # Format selection (so the size/resolution we show is what we download)
 # --------------------------------------------------------------------------- #
@@ -434,7 +678,7 @@ class Job:
         self.id = uuid.uuid4().hex[:10]
         self.seq = 0
         self.url, self.mode, self.cap, self.fmt, self.bitrate, self.outdir = url, mode, cap, fmt, bitrate, outdir
-        self.state = "fetching"      # fetching queued downloading processing done error cancelled
+        self.state = "fetching"      # fetching ready queued downloading processing paused done error cancelled
         self.title, self.uploader = url, ""
         self.duration = self.size = self.height = self.fps = 0
         self.size_est = True
@@ -445,6 +689,8 @@ class Job:
         self.path = None
         self.error = ""
         self.cancel = False
+        self.pause = False
+        self.frac = 0.0
         self.proc = None
         self.row = None
         self.ts = time.time()
@@ -567,7 +813,7 @@ class Row(ctk.CTkFrame):
         b = ctk.CTkButton(self.actions, text=text, command=cmd, width=84, height=30, corner_radius=8,
                           fg_color=ACCENT if accent else CARD2,
                           hover_color=ACCENT_H if accent else HOVER,
-                          text_color="#1a1a1a" if accent else TEXT,
+                          text_color=ON_ACCENT if accent else TEXT,
                           font=ctk.CTkFont(size=12, weight="bold" if accent else "normal"))
         b.pack(pady=3)
 
@@ -579,7 +825,12 @@ class Row(ctk.CTkFrame):
             w.destroy()
 
         st = j.state
-        if st == "fetching":
+        if st == "ready":
+            self._show_bar(False)
+            self.status.configure(text="Ready to download", text_color=MUTED)
+            self._btn("Download", lambda: app.start_job(j), accent=True)
+            self._btn("Remove", lambda: app.remove_job(j))
+        elif st == "fetching":
             self._show_bar(False)
             self.status.configure(text="Fetching info…", text_color=MUTED)
             self._btn("Cancel", lambda: app.cancel_job(j))
@@ -589,7 +840,13 @@ class Row(ctk.CTkFrame):
             self._btn("Cancel", lambda: app.cancel_job(j))
         elif st == "downloading":
             self._show_bar(True)
+            self._btn("Pause", lambda: app.pause_job(j))
             self._btn("Cancel", lambda: app.cancel_job(j))
+        elif st == "paused":
+            self._show_bar(True)
+            self.status.configure(text=f"Paused · {int((j.frac or 0) * 100)}%", text_color=MUTED)
+            self._btn("Resume", lambda: app.resume_job(j), accent=True)
+            self._btn("Remove", lambda: app.remove_job(j))
         elif st == "processing":
             self._show_bar(True)
             self.bar.set(1)
@@ -620,15 +877,18 @@ class Row(ctk.CTkFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        ctk.set_appearance_mode("dark")
+        self.s = {**DEFAULTS, **load_json(SETTINGS_FILE, {})}
+        if not os.path.isdir(self.s["outdir"]):
+            self.s["outdir"] = DEFAULTS["outdir"]
+        self.theme = "light" if str(self.s.get("theme", "dark")).lower() == "light" else "dark"
+        self.s["theme"] = self.theme
+        set_theme(self.theme)
+        apply_accent(self.s.get("accent"))
+        ctk.set_appearance_mode(self.theme)
         self.title(APP_NAME)
         self.geometry("1000x740")
         self.minsize(860, 580)
         self.configure(fg_color=BG)
-
-        self.s = {**DEFAULTS, **load_json(SETTINGS_FILE, {})}
-        if not os.path.isdir(self.s["outdir"]):
-            self.s["outdir"] = DEFAULTS["outdir"]
 
         self.ui_q = queue.Queue()
         self.info_q = queue.Queue()
@@ -637,6 +897,9 @@ class App(ctk.CTk):
         self.ytdlp = self.ffmpeg = None
         self.ready = False
         self._flash_id = None
+        self._accent_win = None
+        self._acc_pane = "grid"
+        self._banner_state = ("Preparing…", 0.0)
         self.placeholder = to_ctk(Image.new("RGB", (THUMB_W * 2, THUMB_H * 2), CARD2))
 
         self._set_icon()
@@ -670,6 +933,266 @@ class App(ctk.CTk):
     def save_settings(self):
         save_json(SETTINGS_FILE, self.s)
 
+    # ---- theme -------------------------------------------------------------- #
+    def toggle_theme(self):
+        self.apply_theme("light" if self.theme == "dark" else "dark")
+
+    def apply_theme(self, name):
+        name = "light" if str(name).lower() == "light" else "dark"
+        if name == self.theme:
+            return
+        self.theme = name
+        self.s["theme"] = name
+        self.save_settings()
+        set_theme(name)
+        ctk.set_appearance_mode(name)
+        self._rebuild_ui()
+
+    def _rebuild_ui(self):
+        self.configure(fg_color=BG)
+        self.placeholder = to_ctk(Image.new("RGB", (THUMB_W * 2, THUMB_H * 2), CARD2))
+        for w in self.winfo_children():
+            if isinstance(w, ctk.CTkToplevel):
+                continue
+            w.destroy()
+        self._build()
+        self._apply_mode()
+        if self.ready:
+            self.banner.pack_forget()
+            self.btn_paste.configure(state="normal")
+            self.btn_download.configure(state="normal")
+        else:
+            text, frac, error = self._banner_state
+            self._banner(text, frac, error)
+            if error:
+                self.banner_retry.pack(anchor="w", padx=16, pady=(0, 12))
+        for j in self.jobs:
+            j.row = Row(self.listf, self, j)
+            if j.thumb_path and os.path.exists(j.thumb_path):
+                try:
+                    j.row.set_thumb(Image.open(j.thumb_path).convert("RGB"))
+                except Exception:
+                    pass
+        self._relayout()
+
+    def set_accent(self, hexv):
+        if hexv is not None and str(hexv).strip():
+            clean = normalize_hex(hexv)
+            if not clean:
+                self.flash("Enter a color like #FF5733", RED)
+                return False
+            hexv = clean
+        else:
+            hexv = None
+        self.s["accent"] = hexv
+        self.save_settings()
+        apply_accent(hexv)
+        self._rebuild_ui()
+        self.flash("Accent: " + (hexv or "theme default"))
+        self._refresh_accent_win()
+        return True
+
+    def _refresh_accent_win(self):
+        win = getattr(self, "_accent_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.after(1, self._render_accent)
+            except Exception:
+                pass
+
+    def _swatch(self, size=16):
+        try:
+            img = Image.new("RGBA", (size * 4, size * 4), (0, 0, 0, 0))
+            ImageDraw.Draw(img).ellipse((0, 0, size * 4 - 1, size * 4 - 1), fill=ACCENT)
+            img = img.resize((size, size), Image.LANCZOS)
+            return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+        except Exception:
+            return None
+
+    def open_accent(self):
+        win = getattr(self, "_accent_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists():
+                    win.deiconify()
+                    win.lift()
+                    win.focus()
+                    return
+            except Exception:
+                pass
+        win = ctk.CTkToplevel(self)
+        self._accent_win = win
+        self._acc_pane = "grid"
+        win.title("Accent color")
+        win.geometry("470x510")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.configure(fg_color=CARD)
+        self._render_accent()
+        win.after(200, win.focus)
+
+    def _render_accent(self):
+        win = getattr(self, "_accent_win", None)
+        if win is None or not win.winfo_exists():
+            return
+        for w in win.winfo_children():
+            w.destroy()
+        F = ctk.CTkFont
+        ctk.CTkLabel(win, text="Accent color", font=F(size=16, weight="bold"),
+                     text_color=TEXT, height=22).pack(padx=20, pady=(8, 0), anchor="w")
+        ctk.CTkLabel(win, text="Pick a swatch · or dial your own", font=F(size=12),
+                     text_color=MUTED, height=16).pack(padx=20, pady=(0, 4), anchor="w")
+        grid_frame = self._accent_grid(win)
+        wheel_frame = ctk.CTkFrame(win, fg_color="transparent")
+        if getattr(self, "_acc_pane", "grid") == "wheel":
+            self._accent_wheel(wheel_frame)
+            wheel_frame.pack(pady=(2, 0))
+        else:
+            grid_frame.pack(pady=(2, 0))
+        self._acc_frames = (grid_frame, wheel_frame)
+        ctk.CTkButton(win, text="Cancel", width=100, height=26, corner_radius=10,
+                      fg_color=CARD2, hover_color=HOVER, text_color=TEXT, font=F(size=13),
+                      command=win.withdraw).pack(pady=(4, 4))
+
+    def _accent_grid(self, parent):
+        F = ctk.CTkFont
+        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        selected = ACCENT_OVERRIDE["hex"]
+        default_hex = PALETTES[_CUR_THEME["name"]]["accent"]
+        for i, (label, hexv) in enumerate(list(ACCENT_PRESETS) + [("Custom", "custom")]):
+            custom = hexv == "custom"
+            sel = hexv == selected
+            cell = ctk.CTkFrame(frame, fg_color="transparent", width=70, height=76,
+                                corner_radius=12, border_width=2 if sel else 0,
+                                border_color=TEXT)
+            cell.grid(row=i // 6, column=i % 6, padx=4, pady=4)
+            cell.grid_propagate(False)
+            cell.pack_propagate(False)
+            name_lbl = ctk.CTkLabel(cell, text=label, wraplength=66, height=26,
+                                    font=F(size=9, weight="bold" if sel else "normal"),
+                                    text_color=TEXT if sel else MUTED)
+            name_lbl.pack(pady=(6, 3))
+            image = _rainbow_disc() if custom else _disc(default_hex if hexv is None else hexv)
+            disc_lbl = ctk.CTkLabel(cell, text="", image=image, width=40, height=40)
+            disc_lbl.pack()
+            if custom:
+                hit = lambda e: self._acc_show_wheel()
+            else:
+                hit = lambda e, v=hexv: self.set_accent(v)
+            for w in (cell, name_lbl, disc_lbl):
+                w.bind("<Button-1>", hit)
+        return frame
+
+    def _accent_wheel(self, pane):
+        F = ctk.CTkFont
+        h, s, v = self._wheel_state()
+        hexv = hsv_hex(h, s, v)
+        self._wh_wheel = self._wheel(self._wh_mark())
+        self._wh_lbl = ctk.CTkLabel(pane, text="", image=self._wh_wheel, width=190, height=190)
+        self._wh_lbl.pack(pady=(4, 8))
+        self._wh_lbl.bind("<Button-1>", self._wheel_pick)
+        self._wh_lbl.bind("<B1-Motion>", self._wheel_pick)
+        self._wh_lbl.bind("<ButtonRelease-1>", self._wheel_commit)
+        self._wh_bar_img = self._bar_ctk(h, s)
+        self._wh_bar = ctk.CTkLabel(pane, text="", image=self._wh_bar_img, width=190, height=16)
+        self._wh_bar.pack(pady=(0, 8))
+        self._wh_bar.bind("<Button-1>", self._bar_pick)
+        row = ctk.CTkFrame(pane, fg_color="transparent")
+        row.pack(pady=(0, 8))
+        self._wh_prev_img = _disc(hexv, 36)
+        self._wh_prev = ctk.CTkLabel(row, text="", image=self._wh_prev_img, width=36, height=36)
+        self._wh_prev.pack(side="left", padx=(0, 8))
+        self._wh_entry = ctk.CTkEntry(row, width=120, height=32, corner_radius=10,
+                                      fg_color=CARD2, text_color=TEXT, border_width=1,
+                                      border_color=HOVER, font=F(size=13))
+        self._wh_entry.pack(side="left", padx=(0, 8))
+        self._wh_entry.insert(0, hexv)
+        ctk.CTkButton(row, text="Apply", width=90, height=32, corner_radius=10,
+                      fg_color=ACCENT, text_color=ON_ACCENT, hover_color=ACCENT_H,
+                      font=F(size=13, weight="bold"),
+                      command=lambda: self.set_accent(self._wh_entry.get())).pack(side="left")
+        ctk.CTkButton(pane, text="← All colors", width=130, height=26, corner_radius=10,
+                      fg_color=CARD2, hover_color=HOVER, text_color=TEXT, font=F(size=13),
+                      command=self._acc_show_grid).pack(pady=(0, 4))
+
+    def _acc_show_wheel(self):
+        grid_frame, wheel_frame = self._acc_frames
+        if not wheel_frame.winfo_children():
+            self._accent_wheel(wheel_frame)
+        self._acc_pane = "wheel"
+        grid_frame.pack_forget()
+        wheel_frame.pack(pady=(2, 0))
+
+    def _acc_show_grid(self):
+        grid_frame, wheel_frame = self._acc_frames
+        self._acc_pane = "grid"
+        wheel_frame.pack_forget()
+        grid_frame.pack(pady=(2, 0))
+
+    def _wheel_state(self):
+        if not hasattr(self, "_wh"):
+            h, s, v = colorsys.rgb_to_hsv(*(c / 255 for c in _hex_rgb(ACCENT)))
+            self._wh, self._ws, self._wv = h * 360.0, s, v
+        return self._wh, self._ws, self._wv
+
+    def _wh_mark(self):
+        t = math.radians(self._wh % 360.0)
+        r = self._ws * 95.0
+        return round(95 + math.sin(t) * r), round(95 - math.cos(t) * r)
+
+    @staticmethod
+    def _bar_ctk(h, s):
+        bar = _bar_img(h, s)
+        return ctk.CTkImage(light_image=bar, dark_image=bar, size=(190, 16))
+
+    def _wheel(self, mark=None):
+        """Supersampled HSV wheel PNG; mark is the (x, y) selection in 190-space."""
+        img = _wheel_img().copy()
+        if mark is not None:
+            d = ImageDraw.Draw(img)
+            x, y = mark
+            d.ellipse((x - 7, y - 7, x + 7, y + 7), outline=(255, 255, 255, 255), width=4)
+            d.ellipse((x - 3, y - 3, x + 3, y + 3), outline=(27, 31, 38, 255), width=2)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=(190, 190))
+
+    def _wheel_update(self):
+        if getattr(self, "_wh_lbl", None) is None or not self._wh_lbl.winfo_exists():
+            return
+        hexv = hsv_hex(self._wh, self._ws, self._wv)
+        self._wh_wheel = self._wheel(self._wh_mark())
+        self._wh_lbl.configure(image=self._wh_wheel)
+        self._wh_bar_img = self._bar_ctk(self._wh, self._ws)
+        self._wh_bar.configure(image=self._wh_bar_img)
+        self._wh_prev_img = _disc(hexv, 36)
+        self._wh_prev.configure(image=self._wh_prev_img)
+        self._wh_entry.delete(0, "end")
+        self._wh_entry.insert(0, hexv)
+
+    def _wheel_pick(self, event):
+        """Press/drag over the wheel: store hue + saturation, refresh, no commit."""
+        if getattr(self, "_wh_lbl", None) is None or not self._wh_lbl.winfo_exists():
+            return
+        size = self._wh_lbl.winfo_reqwidth() or 190
+        k = size / 190.0
+        dx = (event.x - size / 2.0) / k
+        dy = (event.y - size / 2.0) / k
+        self._wh = (math.degrees(math.atan2(dy, dx)) + 90.0) % 360.0
+        self._ws = min(math.hypot(dx, dy) / 95.0, 1.0)
+        self._wheel_update()
+
+    def _wheel_commit(self, event):
+        """Release over the wheel: commit the dialled colour once."""
+        self._wheel_pick(event)
+        self.set_accent(hsv_hex(self._wh, self._ws, self._wv))
+
+    def _bar_pick(self, event):
+        if getattr(self, "_wh_bar", None) is None or not self._wh_bar.winfo_exists():
+            return
+        w = self._wh_bar.winfo_reqwidth() or 190
+        self._wv = max(0.0, min(1.0, event.x / float(w)))
+        self._wheel_update()
+
     def flash(self, msg, color=MUTED):
         self.footer.configure(text=msg, text_color=color)
         if self._flash_id:
@@ -688,6 +1211,52 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _load_icon(self, name, size, alt=None):
+        def _get_pil(fname):
+            if not fname:
+                return None
+            base, ext = os.path.splitext(fname)
+            svg_file = resource_path(os.path.join("assets", base + ".svg"))
+            png_file = resource_path(os.path.join("assets", base + ".png"))
+            if os.path.exists(svg_file):
+                try:
+                    from PySide6.QtGui import QGuiApplication, QImage, QPainter
+                    from PySide6.QtSvg import QSvgRenderer
+                    from PySide6.QtCore import QByteArray
+                    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
+                    with open(svg_file, "r", encoding="utf-8") as f:
+                        svg_data = f.read()
+                    if "-inv" in fname or "-inv" in base:
+                        svg_data = svg_data.replace("currentColor", "#FFFFFF")
+                    else:
+                        svg_data = svg_data.replace("currentColor", "#1A1A1A")
+                    renderer = QSvgRenderer(QByteArray(svg_data.encode("utf-8")))
+                    w, h = size[0] * 4, size[1] * 4
+                    qimg = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+                    qimg.fill(0)
+                    p = QPainter(qimg)
+                    renderer.render(p)
+                    p.end()
+                    ptr = qimg.constBits()
+                    return Image.frombuffer("RGBA", (w, h), bytes(ptr), "raw", "BGRA", 0, 1)
+                except Exception:
+                    pass
+            target_path = resource_path(os.path.join("assets", fname))
+            if not os.path.exists(target_path) and os.path.exists(png_file):
+                target_path = png_file
+            if os.path.exists(target_path):
+                return Image.open(target_path).convert("RGBA")
+            return None
+
+        try:
+            img = _get_pil(name)
+            if img is None:
+                return None
+            dark = _get_pil(alt) if alt else img
+            return ctk.CTkImage(light_image=img, dark_image=dark or img, size=size)
+        except Exception:
+            return None
+
     def _on_close(self):
         for j in self.jobs:
             kill_tree(j.proc)
@@ -696,6 +1265,11 @@ class App(ctk.CTk):
     # ---- layout ------------------------------------------------------------ #
     def _build(self):
         F = ctk.CTkFont
+        dl_icon_file = "icon-download-inv.svg" if ON_ACCENT == "#FFFFFF" else "icon-download.svg"
+        self._ico_dl = self._load_icon(dl_icon_file, (18, 18))
+        self._ico_paste = self._load_icon("icon-paste.svg", (18, 18))
+        self._ico_accent = self._load_icon("icon-accent.svg", (18, 18))
+        self._ico_settings = self._load_icon("icon-settings.svg", (20, 20))
         # header
         head = ctk.CTkFrame(self, fg_color="transparent")
         head.pack(fill="x", padx=22, pady=(16, 6))
@@ -708,22 +1282,47 @@ class App(ctk.CTk):
         ctk.CTkLabel(head, text=APP_NAME, font=F(size=20, weight="bold"), text_color=TEXT).pack(side="left")
         ctk.CTkLabel(head, text="powered by yt-dlp + ffmpeg", font=F(size=12),
                      text_color=MUTED).pack(side="left", padx=12, pady=(6, 0))
+        self.btn_theme = ctk.CTkButton(head, text="☀  Light" if self.theme == "dark" else "☾  Dark",
+                                        width=104, height=32, corner_radius=10, fg_color=CARD2,
+                                        hover_color=HOVER, text_color=TEXT, font=F(size=13),
+                                        command=self.toggle_theme)
+        self.btn_theme.pack(side="right", padx=(12, 0))
+        self.btn_accent = ctk.CTkButton(head, text="Accent", image=self._ico_accent, compound="left",
+                                        width=104, height=32, corner_radius=10, fg_color=CARD2,
+                                        hover_color=HOVER, text_color=TEXT, font=F(size=13),
+                                        command=self.open_accent)
+        self.btn_accent.pack(side="right", padx=(0, 10))
+        ctk.CTkButton(head, text="Clear completed", width=130, height=32, corner_radius=10, fg_color="transparent",
+                      hover_color=CARD2, text_color=MUTED, font=F(size=13),
+                      command=self.clear_completed).pack(side="right", padx=(0, 10))
 
         # toolbar card
         top = ctk.CTkFrame(self, fg_color=CARD, corner_radius=16)
         top.pack(fill="x", padx=20, pady=(4, 8))
         r1 = ctk.CTkFrame(top, fg_color="transparent")
         r1.pack(fill="x", padx=14, pady=(14, 8))
-        self.btn_paste = ctk.CTkButton(r1, text="▶  Paste Link", command=self.paste_link, height=42, width=150,
-                                       corner_radius=12, fg_color=ACCENT, hover_color=ACCENT_H,
-                                       text_color="#1a1a1a", font=F(size=14, weight="bold"), state="disabled")
-        self.btn_paste.pack(side="left")
+        self.btn_download = ctk.CTkButton(r1, text="Download", command=self.start_all, height=42, width=150,
+                                          corner_radius=12, fg_color=ACCENT, hover_color=ACCENT_H,
+                                          text_color=ON_ACCENT, font=F(size=14, weight="bold"), state="disabled",
+                                          image=self._ico_dl, compound="left")
+        self.btn_download.pack(side="left")
         self.entry = ctk.CTkEntry(r1, height=42, corner_radius=12, border_width=0, fg_color=BG,
-                                  placeholder_text="…or type / paste a video or playlist link and press Enter")
+                                  font=F(size=14),
+                                  placeholder_text="…or type / paste a link, then press Enter")
         self.entry.pack(side="left", fill="x", expand=True, padx=10)
         self.entry.bind("<Return>", lambda _e: self.add_from_entry())
-        ctk.CTkButton(r1, text="⚙", width=42, height=42, corner_radius=12, fg_color=BG, hover_color=HOVER,
-                      font=F(size=18), command=self.open_settings).pack(side="left")
+        self.entry.bind("<FocusIn>", lambda _e: self.entry.configure(border_width=1, border_color=ACCENT))
+        self.entry.bind("<FocusOut>", lambda _e: self.entry.configure(border_width=0))
+        self.btn_paste = ctk.CTkButton(r1, text="Paste", command=self.paste_link, height=42, width=120,
+                                       corner_radius=12, fg_color=CARD2, hover_color=HOVER,
+                                       text_color=TEXT, border_width=1, border_color=HOVER,
+                                       font=F(size=14, weight="bold"), state="disabled",
+                                       image=self._ico_paste, compound="left")
+        self.btn_paste.pack(side="left", padx=(0, 8))
+        self.btn_settings = ctk.CTkButton(r1, text="", image=self._ico_settings, width=42, height=42,
+                                          corner_radius=12, fg_color=CARD2, hover_color=HOVER,
+                                          command=self.open_settings)
+        self.btn_settings.pack(side="left")
 
         r2 = ctk.CTkFrame(top, fg_color="transparent")
         r2.pack(fill="x", padx=14, pady=(0, 14))
@@ -731,38 +1330,29 @@ class App(ctk.CTk):
                    dropdown_hover_color=HOVER, dropdown_text_color=TEXT, text_color=TEXT,
                    corner_radius=10, height=34)
 
-        def lab(t):
-            ctk.CTkLabel(r2, text=t, text_color=MUTED, font=F(size=12)).pack(side="left", padx=(0, 6))
+        def group(t, expand=False):
+            g = ctk.CTkFrame(r2, fg_color=CARD2, corner_radius=12)
+            g.pack(side="left", fill="x" if expand else "none", expand=expand, padx=(0, 12))
+            ctk.CTkLabel(g, text=t, text_color=MUTED, font=F(size=11)).pack(anchor="w", padx=12, pady=(9, 2))
+            return g
 
-        lab("Download")
-        self.seg_mode = ctk.CTkSegmentedButton(r2, values=["Video", "Audio"], command=self._mode_cb,
-                                               selected_color="#3B4250", selected_hover_color="#465063",
+        g = group("Download")
+        self.seg_mode = ctk.CTkSegmentedButton(g, values=["Video", "Audio"], command=self._mode_cb,
+                                               selected_color=SEG_ON, selected_hover_color=SEG_ON_H,
                                                unselected_color=BG, unselected_hover_color=HOVER,
                                                fg_color=BG, text_color=TEXT, height=34)
-        self.seg_mode.pack(side="left", padx=(0, 18))
-        lab("Quality")
-        self.opt_q = ctk.CTkOptionMenu(r2, values=["Highest"], command=self._quality_cb, width=130, **opt)
-        self.opt_q.pack(side="left", padx=(0, 18))
-        lab("Format")
-        self.opt_f = ctk.CTkOptionMenu(r2, values=["MP4"], command=self._format_cb, width=100, **opt)
-        self.opt_f.pack(side="left", padx=(0, 18))
-        lab("Save to")
-        self.btn_dir = ctk.CTkButton(r2, text="", command=self.choose_dir, height=34, corner_radius=10,
+        self.seg_mode.pack(padx=12, pady=(0, 10))
+        g = group("Quality")
+        self.opt_q = ctk.CTkOptionMenu(g, values=["Highest"], command=self._quality_cb, width=130, **opt)
+        self.opt_q.pack(padx=12, pady=(0, 10))
+        g = group("Format")
+        self.opt_f = ctk.CTkOptionMenu(g, values=["MP4"], command=self._format_cb, width=100, **opt)
+        self.opt_f.pack(padx=12, pady=(0, 10))
+        g = group("Save to", expand=True)
+        self.btn_dir = ctk.CTkButton(g, text="", command=self.choose_dir, height=34, corner_radius=10,
                                      fg_color=BG, hover_color=HOVER, text_color=TEXT, anchor="w", width=180)
-        self.btn_dir.pack(side="left", fill="x", expand=True)
+        self.btn_dir.pack(fill="x", expand=True, padx=12, pady=(0, 10))
         self._update_dir_label()
-
-        # tabs row
-        tabs = ctk.CTkFrame(self, fg_color="transparent")
-        tabs.pack(fill="x", padx=22, pady=(4, 2))
-        self.tabs = ctk.CTkSegmentedButton(tabs, values=["All", "Video", "Audio"], command=self._relayout,
-                                           selected_color="#3B4250", selected_hover_color="#465063",
-                                           unselected_color=CARD, unselected_hover_color=HOVER,
-                                           fg_color=CARD, text_color=TEXT, height=30)
-        self.tabs.set("All")
-        self.tabs.pack(side="left")
-        ctk.CTkButton(tabs, text="Clear completed", width=120, height=30, fg_color="transparent",
-                      hover_color=CARD2, text_color=MUTED, command=self.clear_completed).pack(side="right")
 
         # footer + banner + list
         self.footer = ctk.CTkLabel(self, text="", anchor="w", text_color=MUTED, font=F(size=12))
@@ -775,14 +1365,31 @@ class App(ctk.CTk):
         self.banner_bar.set(0)
         self.banner_bar.pack(fill="x", padx=16, pady=(0, 8))
         self.banner_retry = ctk.CTkButton(self.banner, text="Retry setup", width=110, height=30,
-                                          fg_color=ACCENT, hover_color=ACCENT_H, text_color="#1a1a1a",
+                                          fg_color=ACCENT, hover_color=ACCENT_H, text_color=ON_ACCENT,
                                           command=self._retry_setup)
         self.banner.pack(fill="x", padx=20, pady=(0, 8))
 
         self.listf = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.listf.pack(fill="both", expand=True, padx=14, pady=(2, 6))
-        self.empty = ctk.CTkLabel(self.listf, text="Copy a video link, then click  Paste Link",
-                                  text_color=MUTED, font=F(size=15))
+        self.empty = ctk.CTkFrame(self.listf, fg_color="transparent")
+        ctk.CTkLabel(self.empty, text="Copy a video link from your browser",
+                     text_color=MUTED, font=F(size=14)).pack(pady=(0, 12))
+        steps = ctk.CTkFrame(self.empty, fg_color="transparent")
+        steps.pack()
+
+        def chip(text, icon):
+            c = ctk.CTkFrame(steps, fg_color=CARD, corner_radius=10)
+            c.pack(side="left")
+            if icon is not None:
+                small = ctk.CTkImage(light_image=icon.cget("light_image"),
+                                     dark_image=icon.cget("dark_image"), size=(16, 16))
+                ctk.CTkLabel(c, text="", image=small).pack(side="left", padx=(10, 4), pady=8)
+            ctk.CTkLabel(c, text=text, text_color=TEXT,
+                         font=F(size=13, weight="bold")).pack(side="left", padx=(0, 10), pady=8)
+
+        chip("Paste Link", self._ico_paste)
+        ctk.CTkLabel(steps, text="→", text_color=MUTED, font=F(size=16)).pack(side="left", padx=10)
+        chip("Download", self._ico_dl)
 
 
     # ---- toolbar callbacks --------------------------------------------------- #
@@ -810,8 +1417,8 @@ class App(ctk.CTk):
         self.save_settings()
 
     def _update_dir_label(self):
-        self.btn_dir.configure(text="  " + ellipsize(os.path.basename(self.s["outdir"].rstrip("/\\"))
-                                                   or self.s["outdir"], 28))
+        base_name = os.path.basename(self.s["outdir"].rstrip("/\\")) or self.s["outdir"]
+        self.btn_dir.configure(text="  📁  " + ellipsize(base_name, 26))
 
     def choose_dir(self):
         d = filedialog.askdirectory(initialdir=self.s["outdir"])
@@ -824,14 +1431,21 @@ class App(ctk.CTk):
     def open_settings(self):
         win = ctk.CTkToplevel(self)
         win.title("Settings")
-        win.geometry("420x360")
+        win.geometry("420x430")
+        win.resizable(False, False)
         win.configure(fg_color=BG)
         win.transient(self)
         F = ctk.CTkFont
         pad = dict(padx=22, anchor="w")
 
-        ctk.CTkLabel(win, text="Simultaneous downloads", text_color=MUTED, font=F(size=12)).pack(pady=(20, 6), **pad)
-        seg = ctk.CTkSegmentedButton(win, values=["1", "2", "3", "4"], selected_color="#3B4250",
+        hdr = ctk.CTkFrame(win, fg_color="transparent")
+        hdr.pack(fill="x", padx=22, pady=(18, 6))
+        if getattr(self, "_ico_settings", None):
+            ctk.CTkLabel(hdr, text="", image=self._ico_settings).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(hdr, text="Settings", font=F(size=18, weight="bold"), text_color=TEXT).pack(side="left")
+
+        ctk.CTkLabel(win, text="Simultaneous downloads", text_color=MUTED, font=F(size=12)).pack(pady=(10, 6), **pad)
+        seg = ctk.CTkSegmentedButton(win, values=["1", "2", "3", "4"], selected_color=SEG_ON,
                                      unselected_color=CARD, fg_color=CARD, text_color=TEXT,
                                      command=lambda v: self._set_setting("parallel", int(v)))
         seg.set(str(self.s["parallel"]))
@@ -847,9 +1461,13 @@ class App(ctk.CTk):
 
         self.upd_btn = ctk.CTkButton(win, text="Update yt-dlp", fg_color=CARD2, hover_color=HOVER,
                                      text_color=TEXT, command=self.update_ytdlp)
-        self.upd_btn.pack(pady=(26, 6), **pad)
+        self.upd_btn.pack(pady=(22, 8), **pad)
         ctk.CTkButton(win, text="Open data folder", fg_color=CARD2, hover_color=HOVER, text_color=TEXT,
                       command=lambda: open_path(str(APP_DIR))).pack(**pad)
+
+        ctk.CTkButton(win, text="Done", width=100, height=32, corner_radius=10,
+                      fg_color=ACCENT, hover_color=ACCENT_H, text_color=ON_ACCENT,
+                      font=F(size=13, weight="bold"), command=win.destroy).pack(pady=(18, 12))
         win.after(200, win.focus)
 
     def _set_setting(self, k, v):
@@ -879,6 +1497,7 @@ class App(ctk.CTk):
 
     # ---- tool setup ---------------------------------------------------------- #
     def _banner(self, text, frac=None, error=False):
+        self._banner_state = (text, frac, error)
         self.banner_lbl.configure(text=text, text_color=RED if error else TEXT)
         if frac is not None:
             self.banner_bar.set(frac)
@@ -910,6 +1529,12 @@ class App(ctk.CTk):
                     install_deno(self._cb("Installing JS runtime"))
                 except Exception:
                     pass  # optional
+            if not find_tool("aria2c"):
+                try:
+                    self.post(self._banner, "Installing multi-segment downloader…", 0)
+                    install_aria2(self._cb("Installing multi-segment downloader"))
+                except Exception:
+                    pass  # optional - single-connection downloads still work
             self.post(self._setup_done)
         except Exception as ex:
             self.post(self._setup_failed, str(ex))
@@ -918,6 +1543,7 @@ class App(ctk.CTk):
         self.ready = True
         self.banner.pack_forget()
         self.btn_paste.configure(state="normal")
+        self.btn_download.configure(state="normal")
 
     def _setup_failed(self, msg):
         self._banner(f"Setup failed: {msg}", 0, error=True)
@@ -940,6 +1566,29 @@ class App(ctk.CTk):
         txt = self.entry.get()
         if self._add_links(txt, "Please enter a valid http(s) link."):
             self.entry.delete(0, "end")
+
+    def start_all(self):
+        txt = self.entry.get()
+        if txt.strip():
+            if self._add_links(txt, "Please enter a valid http(s) link."):
+                self.entry.delete(0, "end")
+        ready = [j for j in sorted(self.jobs, key=lambda j: j.seq) if j.state == "ready"]
+        if not ready:
+            self.flash("Nothing to download yet — paste a link first.", RED)
+            return
+        for j in ready:
+            j.state = "queued"
+            j.row.refresh()
+        self.flash(f"Started {len(ready)} download{'s' if len(ready) != 1 else ''}…")
+        self._pump()
+        self._update_dl_btn()
+
+    def start_job(self, job):
+        if job.state == "ready":
+            job.state = "queued"
+            job.row.refresh()
+            self._pump()
+            self._update_dl_btn()
 
     def _add_links(self, text, err):
         urls = re.findall(r"https?://[^\s]+", text or "")
@@ -976,18 +1625,22 @@ class App(ctk.CTk):
         self.info_q.put(job)
 
     def _relayout(self, *_):
-        flt = self.tabs.get().lower()
         for j in self.jobs:
             j.row.pack_forget()
         shown = 0
         for j in self.jobs:
-            if flt == "all" or flt == j.mode:
-                j.row.pack(fill="x", padx=4, pady=5)
-                shown += 1
+            j.row.pack(fill="x", padx=4, pady=5)
+            shown += 1
         if shown:
             self.empty.pack_forget()
         else:
             self.empty.pack(pady=90)
+        self._update_dl_btn()
+
+    def _update_dl_btn(self):
+        n = sum(1 for j in self.jobs if j.state == "ready")
+        if getattr(self, "btn_download", None):
+            self.btn_download.configure(text="Download" + (f" ({n})" if n else ""))
 
     # ---- info fetching ------------------------------------------------------- #
     def _info_loop(self):
@@ -1043,8 +1696,9 @@ class App(ctk.CTk):
             return
         if img is not None:
             job.row.set_thumb(img)
-        job.state = "queued"
+        job.state = "ready"
         job.row.refresh()
+        self._update_dl_btn()
         self._pump()
 
     def _expand_playlist(self, parent, info):
@@ -1090,15 +1744,22 @@ class App(ctk.CTk):
             active += 1
             threading.Thread(target=self._download_worker, args=(j,), daemon=True).start()
 
-    def _build_cmd(self, job):
+    def _build_cmd(self, job, use_aria=True):
         os.makedirs(job.outdir, exist_ok=True)
         cmd = [self.ytdlp, "--ignore-config", "--newline", "--no-colors", "--no-playlist",
-               "--ffmpeg-location", str(Path(self.ffmpeg).parent), "-N", "4",
+               "--ffmpeg-location", str(Path(self.ffmpeg).parent), "-N", str(FRAG_THREADS),
                "--progress-template",
                "download:[PROG] %(progress.downloaded_bytes)s %(progress.total_bytes)s "
                "%(progress.total_bytes_estimate)s %(progress.speed)s %(progress.eta)s",
                "--print", "after_move:FINAL|%(filepath)s", "--no-quiet",
                "-o", os.path.join(job.outdir, "%(title).150B.%(ext)s")]
+        if use_aria and find_tool("aria2c"):
+            # Split each file into SEGMENTS parallel range requests (aria2c),
+            # while HLS/DASH manifests stay on the native downloader + -N fragments.
+            cmd += ["--downloader", "aria2c",
+                    "--downloader", "dash,m3u8:native",
+                    "--downloader-args",
+                    f"aria2c:-x {SEGMENTS} -s {SEGMENTS} -k 1M --file-allocation=none --auto-save-interval=1"]
         if job.mode == "video":
             cmd += ["-f", job.fmt_sel or "bv*+ba/b", "--merge-output-format", job.fmt]
         else:
@@ -1113,6 +1774,7 @@ class App(ctk.CTk):
 
     def _prog(self, job, frac, text):
         if job in self.jobs and job.state == "downloading":
+            job.frac = frac
             job.row.set_progress(frac, text)
 
     def _set_state(self, job, state):
@@ -1120,16 +1782,15 @@ class App(ctk.CTk):
             job.state = state
             job.row.refresh()
 
-    def _download_worker(self, job):
+    def _download_worker(self, job, use_aria=True):
         started = time.time()
         final = guess = None
         n_dest = 0
         tail = []
         last_post = 0.0
-        num = lambda x: float(x) if re.fullmatch(r"[\d.]+(e[+-]?\d+)?", x or "") else 0.0
         try:
-            proc = popen(self._build_cmd(job), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                         encoding="utf-8", errors="replace", env=tool_env(), bufsize=1)
+            proc = popen(self._build_cmd(job, use_aria), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding="utf-8", errors="replace", env=tool_env(), bufsize=1)
             job.proc = proc
             for raw in proc.stdout:
                 line = raw.strip()
@@ -1137,13 +1798,12 @@ class App(ctk.CTk):
                     continue
                 tail.append(line)
                 tail = tail[-12:]
-                if line.startswith("[PROG]"):
-                    parts = line.split()[1:6]
-                    if len(parts) < 5 or time.time() - last_post < 0.15:
+                pg = parse_progress(line)
+                if pg is not None:
+                    if time.time() - last_post < 0.15:
                         continue
                     last_post = time.time()
-                    d, t, est, sp, eta = (num(p) for p in parts)
-                    tot = t or est
+                    d, tot, sp, eta = pg
                     sizes = job.stream_sizes
                     idx = max(n_dest - 1, 0)
                     if len(sizes) > 1 and sum(sizes) > 0:
@@ -1179,11 +1839,17 @@ class App(ctk.CTk):
                     self.post(self._set_state, job, "processing")
             rc = proc.wait()
         except Exception as ex:
+            if job.pause:
+                self.post(self._paused, job)
+                return
             self.post(self._finish, job, False, f"{ex}", None)
             return
         finally:
             job.proc = None
 
+        if job.pause:
+            self.post(self._paused, job)
+            return
         if job.cancel:
             self.post(self._finish, job, False, "cancelled", None)
         elif rc == 0:
@@ -1196,12 +1862,25 @@ class App(ctk.CTk):
         else:
             errs = [l for l in tail if l.startswith("ERROR")]
             msg = re.sub(r"^ERROR:\s*", "", errs[-1]) if errs else (tail[-1] if tail else "Download failed")
+            if use_aria and not job.cancel and not job.pause and any("aria2c exited" in l for l in tail):
+                # aria2c occasionally dies mid-transfer: drop its leftovers and
+                # redo this job with the plain single-stream downloader.
+                for junk in (guess + ".part", guess + ".part.aria2", guess + ".aria2") if guess else ():
+                    try:
+                        if os.path.isfile(junk):
+                            os.remove(junk)
+                    except OSError:
+                        pass
+                self.post(self.flash, "Multi-segment download stalled — retrying without segments…", MUTED)
+                self._download_worker(job, use_aria=False)
+                return
             self.post(self._finish, job, False, msg, None)
 
     def _finish(self, job, ok, msg, path):
         if job not in self.jobs:
             self._pump()
             return
+        job.pause = False
         if ok:
             job.state, job.path, job.size_est = "done", path, False
             if path and os.path.exists(path):
@@ -1214,14 +1893,43 @@ class App(ctk.CTk):
             job.state, job.error = "error", msg
         job.row.refresh()
         self._pump()
+        self._update_dl_btn()
 
     # ---- job actions --------------------------------------------------------- #
     def cancel_job(self, job):
         job.cancel = True
         kill_tree(job.proc)
-        if job.state in ("fetching", "queued"):
+        if job.state in ("fetching", "queued", "ready", "paused"):
             job.state = "cancelled"
             job.row.refresh()
+
+    def pause_job(self, job):
+        if job.state != "downloading" or job.pause:
+            return
+        job.pause = True
+        kill_tree(job.proc)
+
+    def resume_job(self, job):
+        if job.state != "paused":
+            return
+        job.pause, job.error = False, ""
+        if job.fmt_sel:
+            job.state = "queued"
+            job.row.refresh()
+            self.flash("Resuming…")
+            self._pump()
+        else:
+            job.state = "fetching"
+            job.row.refresh()
+            self.info_q.put(job)
+
+    def _paused(self, job):
+        if job not in self.jobs:
+            self._pump()
+            return
+        job.state = "paused"
+        job.row.refresh()
+        self._pump()
 
     def retry_job(self, job):
         job.cancel, job.error = False, ""

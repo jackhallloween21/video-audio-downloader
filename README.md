@@ -3,6 +3,23 @@
 A modern desktop video & audio downloader powered by **yt-dlp** and **ffmpeg**.
 Both tools are **downloaded automatically on first run** — nothing to install by hand.
 
+## Download for Windows
+
+**[⬇ Download YT-Downloader.exe](https://github.com/jackhallloween21/video-audio-downloader/releases/latest/download/YT-Downloader.exe)** (~20 MB)
+
+No installer, no terminal window — just run it. Every published build is attached to the
+[Releases page](https://github.com/jackhallloween21/video-audio-downloader/releases).
+
+## Screenshots
+
+**Dark mode**
+
+![Dark mode](docs/screenshot-dark.png)
+
+**Light mode**
+
+![Light mode](docs/screenshot-light.png)
+
 <p align="center"><img src="assets/icon.png" width="96" alt="icon"></p>
 
 ## Features
@@ -10,11 +27,22 @@ Both tools are **downloaded automatically on first run** — nothing to install 
 - **Download list** with thumbnail, title, duration, file size, format and resolution (like 4K Video Downloader)
 - **Paste Link** button — grabs links from your clipboard (several at once is fine)
 - Video (MP4 / MKV / WEBM, up to 4K) or audio only (MP3 / M4A / OPUS / FLAC / WAV)
+- **Fast multi-segment downloads** — each file is split across up to 16 parallel connections
+  (aria2c, downloaded for you) plus 8 concurrent HLS/DASH fragments, with a safe single-stream
+  fallback if a server misbehaves
+- **Dark and light mode** — switch with the ☀ / ☾ button in the header; the choice is remembered
+- **Accent color picker** — the **Accent** button in the header (next to the light/dark toggle)
+  opens a grid of named color swatches (Acid Lime, Amber, Fuchsia, Lavender, Neon, Sky …) or a
+  full color wheel for any custom hex; applied instantly and remembered across restarts
+- **Explicit download flow** — pasted links land in the list for review, then a Download button
+  (per-row, or the toolbar ⬇ Download button for everything queued) starts them; nothing auto-starts
+- **Pause / resume** — Pause stops a running download and keeps the partial file; Resume continues
+  from where it stopped (multi-segment downloads pick up via aria2c's control file)
 - Quality picker, live progress, speed and ETA, cancel / retry
 - Playlists expand into individual items (saved in a sub-folder)
 - Parallel downloads (1–4), embed metadata / thumbnail
 - Download history survives restarts; Play and *Show file* buttons
-- Dark, modern UI — and **no terminal window pops up**
+- Modern, clean UI — and **no terminal window pops up**
 
 ## Run from source
 
@@ -27,8 +55,9 @@ python ytdl_gui.py          # Windows: use  pythonw ytdl_gui.py  for zero consol
 
 (If you skip `pip install`, the app will try to install `customtkinter` and `pillow` itself.)
 
-First launch downloads yt-dlp, ffmpeg and a small JavaScript runtime (Deno, which recent yt-dlp
-versions use for YouTube) into `~/.ytdl_gui/bin`. Tools already on your `PATH` are used instead.
+First launch downloads yt-dlp, ffmpeg, aria2c (multi-segment downloader) and a small JavaScript
+runtime (Deno, which recent yt-dlp versions use for YouTube) into `~/.ytdl_gui/bin`. Tools already
+on your `PATH` are used instead.
 
 ## Build the Windows .exe
 
@@ -70,7 +99,7 @@ python -c "from PIL import Image; Image.open('assets/icon.png').save('assets/ico
 
 | What | Where |
 |---|---|
-| yt-dlp / ffmpeg / deno | `~/.ytdl_gui/bin` |
+| yt-dlp / ffmpeg / aria2c / deno | `~/.ytdl_gui/bin` |
 | Settings, history, thumbnail cache | `~/.ytdl_gui/` |
 | Downloads | the *Save to* folder (default: `Downloads`) |
 
