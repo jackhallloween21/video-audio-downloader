@@ -487,6 +487,17 @@ def safe_name(s):
     return re.sub(r'[\\/:*?"<>|]', "_", s or "playlist").strip()[:80] or "playlist"
 
 
+def to_playlist_url(u):
+    # watch?v=..&list=PL.. -> playlist?list=PL.. so the whole playlist is fetched.
+    # RD mixes and WL/LL/UL (private/auto lists) are skipped: they are not real playlists.
+    if "youtube.com/" not in u and "youtu.be/" not in u:
+        return u
+    m = re.search(r"[?&]list=([A-Za-z0-9_-]+)", u)
+    if not m or m.group(1)[:2] in ("RD", "WL", "LL", "UL"):
+        return u
+    return f"https://www.youtube.com/playlist?list={m.group(1)}"
+
+
 # --------------------------------------------------------------------------- #
 # Auto-installer (yt-dlp, ffmpeg, deno)
 # --------------------------------------------------------------------------- #
@@ -1241,11 +1252,29 @@ class App(ctk.CTk):
                     return Image.frombuffer("RGBA", (w, h), bytes(ptr), "raw", "BGRA", 0, 1)
                 except Exception:
                     pass
+            # PySide6 is unavailable in the frozen build -> fall back to the
+            # shipped PNGs (tint the base art white when an -inv variant is missing).
+            stem = base[:-4] if base.endswith("-inv") else base
+            cands = [png_file]
+            if stem != base:
+                cands.append(resource_path(os.path.join("assets", stem + ".png")))
+            for i, p in enumerate(cands):
+                if not os.path.exists(p):
+                    continue
+                try:
+                    im = Image.open(p).convert("RGBA")
+                except Exception:
+                    continue
+                if i:
+                    a = im.getchannel("A")
+                    im = Image.merge("RGBA", (Image.new("L", im.size, 255),) * 3 + (a,))
+                return im
             target_path = resource_path(os.path.join("assets", fname))
-            if not os.path.exists(target_path) and os.path.exists(png_file):
-                target_path = png_file
             if os.path.exists(target_path):
-                return Image.open(target_path).convert("RGBA")
+                try:
+                    return Image.open(target_path).convert("RGBA")
+                except Exception:
+                    return None
             return None
 
         try:
@@ -1605,6 +1634,7 @@ class App(ctk.CTk):
         return True
 
     def _new_job(self, url, parent=None):
+        url = to_playlist_url(url)
         m = self.s["mode"]
         if parent:
             j = Job(url, parent.mode, parent.cap, parent.fmt, parent.bitrate, parent.outdir)
