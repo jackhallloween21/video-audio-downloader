@@ -2,7 +2,9 @@
 
 A modern desktop video & audio downloader powered by **yt-dlp** and **ffmpeg**.
 Both tools are **downloaded automatically on first run** — nothing to install by hand.
+
 <p align="center"><img src="assets/icon.png" width="96" alt="icon"></p>
+
 ## Download for Windows
 
 **[⬇ Download YT-Downloader.exe](https://github.com/jackhallloween21/video-audio-downloader/releases/latest/download/YT-Downloader.exe)** (~20 MB)
@@ -20,6 +22,21 @@ No installer, no terminal window — just run it. Every published build is attac
 
 ![Light mode](docs/screenshot-light.png)
 
+**Downloading** — live progress, speed and ETA
+
+![Downloading with live progress](docs/downloading-dark.png)
+
+**Completed** — Play / Show file / Remove
+
+![Completed download](docs/completed-dark.png)
+
+**Theme selector** — named accent swatches
+
+![Theme selector](docs/theme-selector.png)
+
+…or dial any color on the wheel
+
+![Accent color wheel](docs/theme-selector-wheel.png)
 
 
 ## Features
@@ -38,6 +55,12 @@ No installer, no terminal window — just run it. Every published build is attac
   (per-row, or the toolbar ⬇ Download button for everything queued) starts them; nothing auto-starts
 - **Pause / resume** — Pause stops a running download and keeps the partial file; Resume continues
   from where it stopped (multi-segment downloads pick up via aria2c's control file)
+- **Crash-safe partials** — unfinished files show up as *Partial file on disk* after a restart
+  or crash, and Resume continues them from where they stopped
+- **Per-row resolution picker** — every queued or paused row has its own resolution dropdown
+  (Best, 1080p, 720p, …) so each download can use a different quality
+- **Flicker-free theming** — theme and accent switches recolour the UI in place, with no white
+  flash or scroll stutter
 - Quality picker, live progress, speed and ETA, cancel / retry
 - Playlists expand into individual items (saved in a sub-folder)
 - Parallel downloads (1–4), embed metadata / thumbnail
